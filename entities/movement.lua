@@ -522,7 +522,7 @@ function movement:_physics_process(delta)
 	print((math.ceil(self.velocity:length() * 10) / 10).."/"..(math.ceil(move_speed * 10) / 10)..", "..self.movement_state.." | "..(math.ceil(self.desired_move_direction.x * 10) / 10)..", "..(math.ceil(self.desired_move_direction.y * 10) / 10)..", "..(math.ceil(self.desired_move_direction.z * 10) / 10).." | "..(math.ceil(ground_slope * 100) / 100 * 90).." | "..(math.floor(velocity_correct * 10) / 10).." : "..(math.ceil(self.velocity.x - (self.global_position - previous_position).x * 10) / 10)..", "..(math.ceil(self.velocity.y - (self.global_position - previous_position).y * 10) / 10)..", "..(math.ceil(self.velocity.z - (self.global_position - previous_position).z * 10) / 10))
 	
 	if velocity_correct > 0.1 then
-		--self.velocity = (self.global_position - previous_position) / delta
+		self.velocity = (self.global_position - previous_position) / delta
 	end
 	
 	previous_grounded = ground_check:is_colliding()
