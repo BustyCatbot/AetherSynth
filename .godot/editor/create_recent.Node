@@ -1,0 +1,14 @@
+ShapeCast3D
+AudioStreamPlayer3D
+Node3D
+RayCast3D
+MeshInstance3D
+DirectionalLight3D
+CharacterBody3D
+CollisionShape3D
+StaticBody3D
+Camera3D
+RigidBody3D
+WorldEnvironment
+GridMap
+Node
