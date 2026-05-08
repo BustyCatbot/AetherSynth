@@ -25,6 +25,8 @@ local movement = {
 	air_grip_max = export(30),
 	
 	jump_power = export(5),
+	buffer_cooldown = export(0),
+	buffer_cooldown_max = export(0.25),
 	
 	run_modifier = export(1.75),
 	
@@ -74,15 +76,19 @@ function movement:_unhandled_input(event)
 	end
 end
 
-local previous_velocity = Vector3()
 local previous_grounded = false
 local previous_collided = false
+local previous_wall_normal = Vector3()
 
 local smoothmovedir = Vector3(0,0,1)
 local smoothmovespeed = 0.0
 local smoothjump = 0.0
 local smoothwalldir = Vector3(0,0,1)
 local smoothwalltilt = 0.0
+
+local slidehop = false
+local infinitewallrun = false
+local bufferedjump = false
 
 function movement:_physics_process(delta)
 
@@ -118,6 +124,24 @@ function movement:_physics_process(delta)
 	end
 	local ground_up = self.move_direction:dot(ground_angle_normal * gravity_parallel:dot(ground_angle_normal) - gravity_parallel) / ((self.move_direction - ground_angle_normal * self.move_direction:dot(ground_angle_normal))):length() * (gravity_parallel - ground_angle_normal * gravity_parallel:dot(ground_angle_normal)):length()
 	
+	local ground_ahead_angle = self:get_node("GroundCasts/GroundAheadAngle")
+	ground_ahead_angle:set_position(ground_angle.global_position + self.desired_move_direction * (self.velocity:length() * 0.25))
+	ground_ahead_angle:set_basis(ground_angle.global_transform.basis)
+	local ground_ahead_angle_normal = Vector3()
+	local ground_ahead_slope = 0
+	
+	local ground_ahead_inside = self:get_node("GroundCasts/GroundAheadAngle/GroundAheadInside")
+	
+	print(ground_ahead_angle.global_position:distance_to(ground_ahead_angle:get_collision_point()))
+	if ground_ahead_angle:is_colliding() and not ground_ahead_inside:has_overlapping_bodies() then
+		ground_ahead_angle_normal = ground_ahead_angle:get_collision_normal()
+		ground_ahead_slope = rad_to_deg(math.acos(ground_ahead_angle_normal:dot(-gravity_parallel))) / 90
+	else
+		ground_ahead_angle_normal = ground_angle_normal
+		ground_ahead_slope = 0
+	end
+	local ground_ahead_up = self.move_direction:dot(ground_ahead_angle_normal * gravity_parallel:dot(ground_ahead_angle_normal) - gravity_parallel) / ((self.move_direction - ground_ahead_angle_normal * self.move_direction:dot(ground_ahead_angle_normal))):length() * (gravity_parallel - ground_ahead_angle_normal * gravity_parallel:dot(ground_ahead_angle_normal)):length()
+	
 	local wallrun_left = self:get_node("Casts/WallrunLeft")
 	local wallrun_left_slope = 0
 	if wallrun_left:is_colliding() then
@@ -141,6 +165,14 @@ function movement:_physics_process(delta)
 	if climb:is_colliding() then
 		climb_slope = rad_to_deg(math.acos(climb:get_collision_normal():dot(-gravity_parallel))) / 90
 	end
+	
+	local velocity_correct = self:get_node("Casts/VelocityCorrect")
+	velocity_correct:set_position((self.global_position - gravity_parallel * self.height) - gravity_parallel * math.max(ground_up * 1, 0))
+	velocity_correct:set_basis(self.global_transform.basis)
+	velocity_correct:set_scale(collider.scale)
+	velocity_correct:set_target_position(self.velocity:normalized() * gravity_perpendicular * 0.5 * self.global_transform.basis)
+	
+	self:get_node("VectorVisual"):set_position(move_dir:get_position() + self.desired_move_direction * (self.velocity:length() * 0.1))
 	
 	local audio = self:get_node("Audio")
 	
@@ -170,13 +202,13 @@ function movement:_physics_process(delta)
 	end
 	
 	if self.desired_move_direction:length() > 0 then
-		self.desired_move_direction = self.basis * self.desired_move_direction:normalized()
+		self.desired_move_direction = self.global_transform.basis * self.desired_move_direction:normalized()
 	else
 		self.desired_move_direction = Vector3()
 	end
 	
 	if ground_angle:is_colliding() and grounded and self.desired_move_direction:length() > 0 then
-		self.desired_move_direction = (self.desired_move_direction - ground_angle_normal * self.desired_move_direction:dot(ground_angle_normal)):normalized()
+		self.desired_move_direction = (self.desired_move_direction - ground_angle_normal:lerp(ground_ahead_angle_normal, 0.75) * self.desired_move_direction:dot(ground_angle_normal:lerp(ground_ahead_angle_normal, 0.75))):normalized()
 	end
 	
 	local move_speed = self.base_speed
@@ -196,11 +228,10 @@ function movement:_physics_process(delta)
 	
 	move_dir:set_target_position(self.move_direction * clamp(self.velocity:length(),0,1))
 	move_dir:set_position(self.global_position + -gravity_parallel * 0.1)
+	move_dir:set_basis(self.global_transform.basis)
 	if (self.velocity * -gravity_parallel) > -gravity_parallel and not grounded then
-		move_dir:set_position(self.global_position + Vector3(0,1.5,0))
+		move_dir:set_position(self.global_position + -gravity_parallel * 1.5)
 	end
-	
-	self:get_node("VectorVisual"):set_position(move_dir:get_position() + move_dir:get_target_position())
 	
 	-- State Definition
 	
@@ -226,7 +257,7 @@ function movement:_physics_process(delta)
 			if Input:is_action_pressed("run") and Input:is_action_pressed("crouch") and self.velocity:length() > self.base_speed * 1.1 then
 				self.movement_state = "slide"
 				Audio:play(audio, "physics/body/body_slide", 0.5, 1.0, 5.0, "physics")
-				if self.slide_cooldown <= 0 then
+				if self.slide_cooldown <= 0 or slidehop then
 					self.velocity = self.velocity * self.slide_boost
 				end
 			end
@@ -250,18 +281,28 @@ function movement:_physics_process(delta)
 					self.climb_tick = 0
 					self.desired_height = 1.0
 				end
-			elseif wallrun_left:is_colliding() and not ground_gap:is_colliding() and wallrun_left_slope > 0.8 then
-				if self.wallrun_cooldown <= 0 then
+			elseif wallrun_left:is_colliding() and not ground_gap:is_colliding() and wallrun_left_slope > 0.8 and Input:is_action_pressed("run") and self.velocity:length() > self.base_speed * self.crouch_modifier and (wallrun_left:get_collision_normal() ~= previous_wall_normal or infinitewallrun) then
+				if self.wallrun_cooldown <= self.wallrun_cooldown_max * 0.5 then
 					self.movement_state = "wallrun"
-					smoothwalldir = wallrun_left:get_collision_normal():rotated(Vector3(0,1,0), deg_to_rad(-90))
-					self.velocity = self.velocity * 0.5 + wallrun_left:get_collision_normal():rotated(Vector3(0,1,0), deg_to_rad(90)) * self.velocity:length() * self.wallrun_boost + self.gravity * -0.1
+					self.wallrun_cooldown = self.wallrun_cooldown_max
+					smoothwalldir = wallrun_left:get_collision_normal():rotated(gravity_parallel, deg_to_rad(90))
+					if self.wallrun_cooldown <= 0 then
+						self.velocity = self.velocity * 0.5 + wallrun_left:get_collision_normal():rotated(gravity_parallel, deg_to_rad(-90)) * self.velocity:length() * self.wallrun_boost + self.gravity * -0.1
+					else
+						self.velocity = self.velocity * 0.5 + wallrun_left:get_collision_normal():rotated(gravity_parallel, deg_to_rad(-90)) * self.velocity:length() + self.gravity * -0.1
+					end
 					self.desired_height = 1.0
 				end
-			elseif wallrun_right:is_colliding() and not ground_gap:is_colliding() and wallrun_right_slope > 0.8 then
-				if self.wallrun_cooldown <= 0 then
+			elseif wallrun_right:is_colliding() and not ground_gap:is_colliding() and wallrun_right_slope > 0.8 and Input:is_action_pressed("run") and self.velocity:length() > self.base_speed * self.crouch_modifier and (wallrun_right:get_collision_normal() ~= previous_wall_normal or infinitewallrun) then
+				if self.wallrun_cooldown <= self.wallrun_cooldown_max * 0.5 then
 					self.movement_state = "wallrun"
-					smoothwalldir = wallrun_right:get_collision_normal():rotated(Vector3(0,1,0), deg_to_rad(-90))
-					self.velocity = self.velocity * 0.5 + wallrun_right:get_collision_normal():rotated(Vector3(0,1,0), deg_to_rad(-90)) * self.velocity:length() * self.wallrun_boost + self.gravity * -0.1
+					self.wallrun_cooldown = self.wallrun_cooldown_max
+					smoothwalldir = wallrun_right:get_collision_normal():rotated(gravity_parallel, deg_to_rad(90))
+					if self.wallrun_cooldown <= 0 then
+						self.velocity = self.velocity * 0.5 + wallrun_right:get_collision_normal():rotated(gravity_parallel, deg_to_rad(90)) * self.velocity:length() * self.wallrun_boost + self.gravity * -0.1
+					else
+						self.velocity = self.velocity * 0.5 + wallrun_right:get_collision_normal():rotated(gravity_parallel, deg_to_rad(90)) * self.velocity:length() + self.gravity * -0.1
+					end
 					self.desired_height = 1.0
 				end
 			else
@@ -319,7 +360,8 @@ function movement:_physics_process(delta)
 			self.slide_cooldown = self.slide_cooldown_max
 		end
 		
-		if Input:is_action_just_pressed("jump") then
+		if Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump")) then
+			self.buffer_cooldown = self.buffer_cooldown_max
 			self.movement_state = "air"
 			Audio:stop(audio, "physics/body/body_slide")
 			Audio:play(audio, "physics/body/body_impact_soft"..randi_range(1,3), 0.75, 1.0, 5.0, "physics")
@@ -357,8 +399,6 @@ function movement:_physics_process(delta)
 		
 		walltilt = -7.5
 		
-		self.velocity = self.velocity - self.velocity * self.wallrun_friction + ((self.gravity * self.wallrun_gravity) * delta) + -self.wall:get_collision_normal()
-		
 		if grounded then
 			self.movement_state = "walk"
 			self.wallrun_cooldown = self.wallrun_cooldown_max
@@ -379,7 +419,10 @@ function movement:_physics_process(delta)
 			self.wallrun_cooldown = self.wallrun_cooldown_max
 		end
 		
-		if Input:is_action_just_pressed("jump") then
+		self.velocity = self.velocity - self.velocity * self.wallrun_friction + ((self.gravity * self.wallrun_gravity) * delta) - (self.wall:get_collision_normal() * self.wall:get_position():distance_to(self.wall:get_collision_point()) * 0.01)
+		
+		if Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump")) then
+			self.buffer_cooldown = self.buffer_cooldown_max
 			self.movement_state = "air"
 			self.velocity = self.velocity * 0.75 + self.wall:get_collision_normal() * 2 * self.wallrun_jump_boost + -gravity_parallel * self.wallrun_jump_boost * 4 + head.basis.z * 1 * self.wallrun_jump_boost
 			self.slide_cooldown = 0.0
@@ -427,7 +470,8 @@ function movement:_physics_process(delta)
 			self.movement_state = "air"
 		end
 		
-		if Input:is_action_pressed("jump") then
+		if Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump")) then
+			self.buffer_cooldown = self.buffer_cooldown_max
 			self.movement_state = "air"
 			self.velocity = -self.gravity * 0.65
 			Audio:play(audio, "physics/concrete/concrete_step"..randi_range(1,4), 1.0, 1.0, 5.0, "physics")
@@ -436,7 +480,8 @@ function movement:_physics_process(delta)
 
 	end
 	
-	if self.can_jump and Input:is_action_just_pressed("jump") then
+	if self.can_jump and (Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump"))) then
+		self.buffer_cooldown = self.buffer_cooldown_max
 		self.can_jump = false
 		self.velocity = self.velocity * gravity_perpendicular + -gravity_parallel * self.jump_power
 		Audio:play(audio, "physics/concrete/concrete_step"..randi_range(1,4), 1.0, 1.0, 5.0, "physics")
@@ -454,6 +499,16 @@ function movement:_physics_process(delta)
 	self.velocity.y = clamp(self.velocity.y, -self.terminal_velocity, self.terminal_velocity)
 	self.velocity.z = clamp(self.velocity.z, -self.terminal_velocity, self.terminal_velocity)
 	
+	if velocity_correct:get_collision_count() > 0 then
+		print("count "..velocity_correct:get_collision_count())
+		for i = 0, velocity_correct:get_collision_count() - 1 do
+			if velocity_correct:get_collision_normal(i) ~= Vector3(0,0,0) then
+				local velocity_negate = Vector3(1,1,1) - Vector3(math.abs(velocity_correct:get_collision_normal(i).x * 0.25), math.abs(velocity_correct:get_collision_normal(i).y * 0.25), math.abs(velocity_correct:get_collision_normal(i).z * 0.25))
+				self.velocity = self.velocity * velocity_negate
+			end
+		end
+	end
+	
 	if not (top_check:is_colliding() and self.desired_height > self.height) then
 		self.height = lerp(self.height, self.desired_height, 0.1)
 	end
@@ -467,7 +522,7 @@ function movement:_physics_process(delta)
 	ground_casts:set_position(Vector3(0, self.height * 0.25, 0))
 	top_check:set_position(Vector3(0, self.height * 1.75, 0))
 	
-	smoothmovedir = lerp(smoothmovedir, (self.move_direction * gravity_perpendicular):rotated(Vector3(0,1,0), deg_to_rad(90)), 0.25):normalized()
+	smoothmovedir = lerp(smoothmovedir, (self.move_direction * gravity_perpendicular):rotated(gravity_parallel, deg_to_rad(90)), 0.25):normalized()
 	
 	local forward = clamp(math.abs(smoothmovedir:dot(self.basis.z)), 0.5, 1.0)
 	
@@ -490,7 +545,7 @@ function movement:_physics_process(delta)
 	end
 	
 	smoothjump = lerp(smoothjump, jump, 0.1)
-	smoothwalldir = lerp(smoothwalldir, walldir:rotated(Vector3(0,1,0), deg_to_rad(-90)), 0.05):normalized()
+	smoothwalldir = lerp(smoothwalldir, walldir:rotated(gravity_parallel, deg_to_rad(90)), 0.05):normalized()
 	smoothwalltilt = lerp(smoothwalltilt, walltilt, 0.1)
 	
 	smoothmovedir = Vector3(clamp(smoothmovedir.x,-1,1),clamp(smoothmovedir.y,-1,1),clamp(smoothmovedir.z,-1,1)):normalized()
@@ -510,7 +565,9 @@ function movement:_physics_process(delta)
 		self.slide_cooldown = self.slide_cooldown - delta
 	end
 	
-	if self.wallrun_cooldown > 0 then
+	if self.wallrun_cooldown > 0 and ground_check:is_colliding() then
+		self.wallrun_cooldown = self.wallrun_cooldown - delta
+	elseif self.wallrun_cooldown * self.wallrun_cooldown_max * 0.5 then
 		self.wallrun_cooldown = self.wallrun_cooldown - delta
 	end
 	
@@ -518,15 +575,20 @@ function movement:_physics_process(delta)
 		self.climb_cooldown = self.climb_cooldown - delta
 	end
 	
-	local velocity_correct = ((self.velocity) - (self.global_position - previous_position) / delta):length()
-	print((math.ceil(self.velocity:length() * 10) / 10).."/"..(math.ceil(move_speed * 10) / 10)..", "..self.movement_state.." | "..(math.ceil(self.desired_move_direction.x * 10) / 10)..", "..(math.ceil(self.desired_move_direction.y * 10) / 10)..", "..(math.ceil(self.desired_move_direction.z * 10) / 10).." | "..(math.ceil(ground_slope * 100) / 100 * 90).." | "..(math.floor(velocity_correct * 10) / 10).." : "..(math.ceil(self.velocity.x - (self.global_position - previous_position).x * 10) / 10)..", "..(math.ceil(self.velocity.y - (self.global_position - previous_position).y * 10) / 10)..", "..(math.ceil(self.velocity.z - (self.global_position - previous_position).z * 10) / 10))
-	
-	if velocity_correct > 0.1 then
-		self.velocity = (self.global_position - previous_position) / delta
+	if self.buffer_cooldown > 0 and bufferedjump then
+		self.buffer_cooldown = self.buffer_cooldown - delta
 	end
+	
+	print((math.ceil(self.velocity:length() * 10) / 10).."/"..(math.ceil(move_speed * 10) / 10)..", "..self.movement_state.." | "..(math.ceil(self.desired_move_direction.x * 10) / 10)..", "..(math.ceil(self.desired_move_direction.y * 10) / 10)..", "..(math.ceil(self.desired_move_direction.z * 10) / 10).." | "..(math.ceil(ground_slope * 100) / 100 * 90))
 	
 	previous_grounded = ground_check:is_colliding()
 	previous_collided = full_collide:is_colliding()
+	
+	if self.wall and self.wall:is_colliding() then
+		previous_wall_normal = self.wall:get_collision_normal()
+	elseif ground_check:is_colliding() then
+		previous_wall_normal = nil
+	end
 	
 end
 
