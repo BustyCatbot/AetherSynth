@@ -424,7 +424,7 @@ function movement:_physics_process(delta)
 		if Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump")) then
 			self.buffer_cooldown = self.buffer_cooldown_max
 			self.movement_state = "air"
-			self.velocity = self.velocity * 0.75 + self.wall:get_collision_normal() * 2 * self.wallrun_jump_boost + -gravity_parallel * self.wallrun_jump_boost * 4 + head.basis.z * 1 * self.wallrun_jump_boost
+			self.velocity = self.velocity * 0.75 + (self.wall:get_collision_normal() * 2 * self.wallrun_jump_boost) + (-gravity_parallel * self.jump_power) + (-self.basis.z * self.velocity:length() * 0.25 * self.wallrun_jump_boost)
 			self.slide_cooldown = 0.0
 			self.wallrun_cooldown = self.wallrun_cooldown_max
 			Audio:play(audio, "physics/concrete/concrete_step"..randi_range(1,4), 1.0, 1.0, 5.0, "physics")
