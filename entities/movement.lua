@@ -20,10 +20,11 @@ local movement = {
 	acceleration = export(0.15),
 	grip_max = export(30),
 	
-	air_control = export(0.5),
+	air_control = export(0.25),
 	air_modifier = export(0.25),
 	air_grip_max = export(30),
 	air_strafe = export(0.5),
+	air_strafe_threshold = export(math.pi / 3),
 	
 	jump_power = export(5),
 	buffer_cooldown = export(0),
@@ -34,14 +35,15 @@ local movement = {
 	crouch_modifier = export(0.5),
 	crouch_speed = export(1),
 	
-	slide_boost = export(1.1),
+	slide_boost = export(1.25),
 	slide_jump_boost = export(1.1),
 	slide_friction = export(0.01),
 	slide_drift = export(0.5),
 	slide_cooldown = export(0.5),
 	slide_cooldown_max = export(0.5),
+	slide_drift_threshold = export(math.pi / 2),
 	
-	wallrun_boost = export(1.1),
+	wallrun_boost = export(1.25),
 	wallrun_jump_boost = export(1.1),
 	wallrun_friction = export(0.01),
 	wallrun_gravity = export(0.1),
@@ -49,8 +51,8 @@ local movement = {
 	wallrun_cooldown_max = export(0.5),
 	wall = nil,
 	
-	climb_speed = export(4),
-	climb_friction = export(0.15),
+	climb_speed = export(6),
+	climb_friction = export(0.3),
 	climb_gravity = export(0.75),
 	climb_velocity = export(0),
 	climb_tick = export(0),
@@ -88,7 +90,7 @@ local smoothjump = 0.0
 local smoothwalldir = Vector3(0,0,1)
 local smoothwalltilt = 0.0
 
-local slidejump = false
+local slidejump = true
 local slidehop = false
 local infinitewallrun = false
 local bufferedjump = false
@@ -235,10 +237,8 @@ function movement:_physics_process(delta)
 		move_dir:set_position(self.global_position + -gravity_parallel * 1.5)
 	end
 	
-	local strafe_angle = math.acos(self.velocity:normalized():dot(self.desired_move_direction))		
+	local strafe_angle = math.acos(self.velocity:normalized():dot(self.desired_move_direction))
 	local strafe_sign = self.velocity:normalized():cross(self.desired_move_direction):dot(gravity_parallel) >= 0 and 1 or -1
-	local air_threshold = math.pi / 4
-	local drift_threshold = math.pi / 2
 	
 	-- State Definition
 	
@@ -359,17 +359,21 @@ function movement:_physics_process(delta)
 			self.slide_cooldown = self.slide_cooldown_max
 		end
 		
-		if (Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump"))) and slidejump then
+		if Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump")) then
 			self.buffer_cooldown = self.buffer_cooldown_max
 			self.movement_state = "air"
 			Audio:stop(audio, "physics/body/body_slide")
 			Audio:play(audio, "physics/body/body_impact_soft"..randi_range(1,3), 0.75, 1.0, 5.0, "physics")
-			self.velocity = self.velocity * gravity_perpendicular + -gravity_parallel * self.jump_power * self.slide_jump_boost
+			if slidejump or self.height < 0.5 then
+				self.velocity = self.velocity * gravity_perpendicular + -gravity_parallel * self.jump_power * self.slide_jump_boost
+			else
+				self.velocity = self.velocity * gravity_perpendicular * 0.75 + -gravity_parallel * self.jump_power * 0.75
+			end
 			self.slide_cooldown = self.slide_cooldown_max
 		end
 		
-		if strafe_angle > drift_threshold then
-			self.velocity = self.velocity:rotated(gravity_parallel, deg_to_rad((strafe_angle - drift_threshold) * strafe_sign) * self.slide_drift)
+		if strafe_angle > self.slide_drift_threshold and self.desired_move_direction:length() > 0 then
+			self.velocity = self.velocity:rotated(gravity_parallel, deg_to_rad((strafe_angle - self.slide_drift_threshold) * strafe_sign) * self.slide_drift)
 		end
 		
 		self.velocity = self.velocity - self.velocity * (ground_up * 5 + 1) * self.slide_friction
@@ -384,8 +388,8 @@ function movement:_physics_process(delta)
 			friction = self.velocity * self.air_drag
 		end
 		
-		if strafe_angle > air_threshold then
-			self.velocity = self.velocity:rotated(gravity_parallel, deg_to_rad((strafe_angle - air_threshold) * strafe_sign) * self.air_strafe)
+		if strafe_angle > self.air_strafe_threshold and self.desired_move_direction:length() > 0 then
+			self.velocity = self.velocity:rotated(gravity_parallel, deg_to_rad((strafe_angle - self.air_strafe_threshold) * strafe_sign) * self.air_strafe)
 		end
 		
 		self.velocity = self.velocity + self.desired_move_direction * factor - friction + (self.gravity * delta)
@@ -480,7 +484,12 @@ function movement:_physics_process(delta)
 		if Input:is_action_just_pressed("jump") or (bufferedjump and self.buffer_cooldown <= 0 and Input:is_action_pressed("jump")) then
 			self.buffer_cooldown = self.buffer_cooldown_max
 			self.movement_state = "air"
-			self.velocity = -self.gravity * 0.65
+			if climb:is_colliding() then
+				self.velocity = -self.gravity * 0.65
+			else
+				self.velocity = -self.gravity * 0.5 + -self.basis.z * 7.5
+				self.climb_cooldown = 0
+			end
 			Audio:play(audio, "physics/concrete/concrete_step"..randi_range(1,4), 1.0, 1.0, 5.0, "physics")
 			Audio:play(audio, "physics/body/body_impact_soft"..randi_range(1,3), 0.5, 1.0, 5.0, "physics")
 		end
