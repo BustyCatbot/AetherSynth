@@ -522,7 +522,7 @@ function movement:_physics_process(delta)
 	ground_casts:set_position(Vector3(0, self.height * 0.25, 0))
 	top_check:set_position(Vector3(0, self.height * 1.75, 0))
 	
-	smoothmovedir = lerp(smoothmovedir, (self.move_direction * gravity_perpendicular):rotated(gravity_parallel, deg_to_rad(90)), 0.25):normalized()
+	smoothmovedir = lerp(smoothmovedir, (self.move_direction * gravity_perpendicular):rotated(gravity_parallel, deg_to_rad(-90)), 0.25):normalized()
 	
 	local forward = clamp(math.abs(smoothmovedir:dot(self.basis.z)), 0.5, 1.0)
 	
